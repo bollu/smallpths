@@ -4,6 +4,7 @@
 {-# LANGUAGE UnboxedSums #-}
 {-# LANGUAGE UnliftedNewtypes #-}
 module Main where
+import Control.Monad
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VM
 import Data.List (find, minimumBy, foldl')
@@ -12,6 +13,7 @@ import Text.Printf
 import Foreign
 import Foreign.C.Types
 import GHC.Base (isTrue#)
+import GHC.Conc
 import GHC.Prim
 import GHC.Types (Bool(..), Double(..), Int(..))
 import System.IO (stderr, withFile, IOMode(..))
@@ -164,9 +166,8 @@ smallpt (I# w) (I# h) nsamps = do
       flip mapM_ [0..(I# (w-#1#))] $ \(I# x) -> do
         let i = (h-#y-#1#) *# w +# x
         flip mapM_ [0..1] $ \(D# sy) -> do
-          flip mapM_ [0..1] $ \(D# sx) -> do
-            r <- newIORef zerov
-            flip mapM_ [0..(I# (samps-#1#))] $ \s -> do
+          (\func -> foldM_ func zerov [0..1]) $ \r (D# sx) -> do
+            r' <- (\funcin -> foldM funcin r [0..(I# (samps-#1#))]) $ \rin s -> do
               (CDouble (D# r1)) <- (2*) `fmap` erand48 xi
               let dx = if isTrue# (r1<## 1.0##) then sqrtDouble# r1-##1.0## else 1.0## -## sqrtDouble# (2.0## -## r1)
               (CDouble (D# r2)) <- (2*) `fmap` erand48 xi
@@ -175,10 +176,11 @@ smallpt (I# w) (I# h) nsamps = do
                       (cy `mulvs` (((sy +## 0.5## +## dy)/##2.0## +## int2Double# y)/##(int2Double# h) -## 0.5##)) `addv` dir
               rad <- radiance (Ray (org`addv`(d`mulvs`140.0##)) (norm d)) 0 xi
               -- Camera rays are pushed forward ^^^^^ to start in interior
-              modifyIORef r (`addv` (rad `mulvs` (1.0## /## int2Double# samps)))
+              pure $ addv rin (rad `mulvs` (1.0## /## int2Double# samps))
             ci <- VM.unsafeRead c (I# i)
-            Vec rr rg rb <- readIORef r
+            let (Vec rr rg rb) = r'
             VM.unsafeWrite c (I# i) (ci `addv` (Vec (clamp rr) (clamp rg) (clamp rb) `mulvs` 0.25##))
+            pure r'
 
   withFile "image-storable.ppm" WriteMode $ \hdl -> do
 	hPrintf hdl "P3\n%d %d\n%d\n" (I# w) (I# h) (255::Int)
