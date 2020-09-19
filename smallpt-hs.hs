@@ -219,10 +219,6 @@ unsigned short __seed48[7] = { 0, 0, 0, 0xe66d, 0xdeec, 0x5, 0xb };
 -}
 
 
-word2Double# :: Word# -> Double#; word2Double# = undefined
-leftShiftWord# :: Word# -> Word#; leftShiftWord# = undefined
-bitwiseOrWord# :: Word# -> Word#; bitwiseOrWord# = undefined
-
 concatWord# :: Word# -> Word# -> Word# -> Word#
 concatWord# x0 x1 x2 = x0 `or#` (x1 `uncheckedShiftL#` 16#) `or#` (x2 `uncheckedShiftL#` 32#)
 rand48_step# :: Word# -> Word#
@@ -235,17 +231,17 @@ rand48_step# x =
   in x `and#` 0xffffffffffff##
 
 erand48 :: TVar Word -> IO Double
-erand48 t = atomically $ do
-  (W# r) <- readTVar t
-  let (# r', d #) = erand48# r
-  writeTVar t (W# r')
-  pure (D# d)
+erand48 t = pure 0.5-- atomically $ do
+  -- (W# r) <- readTVar t
+  -- let (# r', d #) = erand48# r
+  -- writeTVar t (W# r')
+  -- pure 0.5 -- (D# d)
 
 erand48# :: Word# -> (# Word#, Double# #)
 erand48# i =
   let r = rand48_step# i
       d_word = (0x3ff0000000000000##) `or#` (r `uncheckedShiftL#` 4#)
-      in (# i, stgWord64ToDouble d_word #)
+      in (# i, (stgWord64ToDouble d_word) -## 1.0## #)
 
 
 instance Storable Vec where
