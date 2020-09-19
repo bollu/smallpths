@@ -14,11 +14,12 @@ import Foreign
 import Foreign.C.Types
 import GHC.Base (isTrue#)
 import GHC.Conc
+import GHC.Float hiding (clamp)
 import GHC.Prim
-import GHC.Types (Bool(..), Double(..), Int(..))
+import GHC.Types (Bool(..), Double(..), Int(..), Word(..))
 import System.IO (stderr, withFile, IOMode(..))
 -- position, also color (r,g,b)
-data Vec = Vec {-# UNPACK #-} !Double# {-# UNPACK #-} !Double# {-# UNPACK #-} !Double#
+data Vec = Vec !Double# !Double# !Double#
 zerov = Vec 0.0## 0.0## 0.0##
 addv (Vec a b c) (Vec x y z) = Vec (a+##x) (b+##y) (c+##z)
 subv (Vec a b c) (Vec x y z) = Vec (a-##x) (b-##y) (c-##z)
@@ -38,7 +39,7 @@ data Ray = Ray {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec -- origin, direction
 data Refl = DIFF | SPEC | REFR -- material types, used in radiance
 
 -- radius, position, emission, color, reflection
-data Sphere = Sphere {-# UNPACK #-} !Double# {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Refl
+data Sphere = Sphere !Double# {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec !Refl
 
 type Maybe' a = (# (# #) | a #)
 
@@ -82,7 +83,7 @@ intersects ray = (k, s)
                   (Just y,Just x) | x < y -> (Just x,s)
                   _ -> (k,sp)
 
-radiance :: Ray -> CInt -> Ptr CUShort -> IO Vec
+radiance :: Ray -> CInt -> TVar Word -> IO Vec
 radiance ray@(Ray o d) depth xi =
  case intersects ray of
   (Nothing,_) -> return zerov
@@ -94,9 +95,9 @@ radiance ray@(Ray o d) depth xi =
         depth' = depth + 1
         continue f = case refl of
           DIFF -> do
-            (CDouble (D# r)) <- erand48 xi
+            (D# r) <- erand48 xi
             let r1 = (2.0## *## 3.141592653589793238##) *##  r
-            (CDouble (D# r2)) <- erand48 xi
+            (D# r2) <- erand48 xi
             let r2s = sqrtDouble# r2
                 w@(Vec wx _ _) = nl
                 u = norm (cross (if isTrue# (fabsDouble# wx >## 0.1##) then (Vec 0.0## 1.0## 0.0##) else (Vec 1.0## 0.0## 0.0##)) w)
@@ -135,7 +136,7 @@ radiance ray@(Ray o d) depth xi =
                     tp=tr /## (1.0## -## pp)
                 rad <-
                   if (depth > 2 )
-                    then do (CDouble (D# er)) <- erand48 xi
+                    then do (D# er) <- erand48 xi
                             if isTrue# (er<##pp) -- Russian roulette
                               then (`mulvs` rp) `fmap` radiance reflRay depth' xi
                               else (`mulvs` tp) `fmap` radiance (Ray x tdir) depth' xi
@@ -146,7 +147,7 @@ radiance ray@(Ray o d) depth xi =
 
     if depth'>5
       then do
-        (CDouble (D# er)) <- erand48 xi
+        (D# er) <- erand48 xi
         if isTrue# (er <## pr) then continue $ c `mulvs` (1.0## /## pr)
                   else return e
       else continue c
@@ -159,18 +160,17 @@ smallpt (I# w) (I# h) nsamps = do
       cx = Vec (int2Double# w *## 0.5135## /## int2Double# h) 0.0## 0.0##
       cy = norm (cx `cross` dir) `mulvs` 0.5135##
   c <- VM.replicate ((I# w) * (I# h)) zerov
-  allocaArray 3 $ \xi ->
-	flip mapM_ [0..(I# (h-#1#))] $ \(I# y) -> do
-	  --hPrintf stderr "\rRendering (%d spp) %5.2f%%" (samps*4::Int) (100.0*fromIntegral y/(fromIntegral h-1)::Double)
-      writeXi xi y
+  xi <- newTVarIO 0
+  flip mapM_ [0..(I# (h-#1#))] $ \(I# y) -> do
+      atomically $ writeTVar xi (W# (int2Word# y))
       flip mapM_ [0..(I# (w-#1#))] $ \(I# x) -> do
         let i = (h-#y-#1#) *# w +# x
         flip mapM_ [0..1] $ \(D# sy) -> do
           (\func -> foldM_ func zerov [0..1]) $ \r (D# sx) -> do
             r' <- (\funcin -> foldM funcin r [0..(I# (samps-#1#))]) $ \rin s -> do
-              (CDouble (D# r1)) <- (2*) `fmap` erand48 xi
+              (D# r1) <- (2*) `fmap` erand48 xi
               let dx = if isTrue# (r1<## 1.0##) then sqrtDouble# r1-##1.0## else 1.0## -## sqrtDouble# (2.0## -## r1)
-              (CDouble (D# r2)) <- (2*) `fmap` erand48 xi
+              (D# r2) <- (2*) `fmap` erand48 xi
               let dy = if isTrue# (r2<##1.0##) then sqrtDouble# r2-##1.0## else 1.0## -## sqrtDouble# (2.0## -## r2)
                   d = (cx `mulvs` (((sx +## 0.5## +## dx)/##2.0## +## int2Double# x)/##(int2Double# w) -## 0.5##)) `addv`
                       (cy `mulvs` (((sy +## 0.5## +## dy)/##2.0## +## int2Double# y)/##(int2Double# h) -## 0.5##)) `addv` dir
@@ -183,23 +183,70 @@ smallpt (I# w) (I# h) nsamps = do
             pure r'
 
   withFile "image-storable.ppm" WriteMode $ \hdl -> do
-	hPrintf hdl "P3\n%d %d\n%d\n" (I# w) (I# h) (255::Int)
-	flip mapM_ [0..(I# (w*#h-#1#))] $ \i -> do
-	  Vec r g b <- VM.unsafeRead c i
-	  hPrintf hdl "%d %d %d " (I# (toInt r)) (I# (toInt  g)) (I# (toInt b))
+        hPrintf hdl "P3\n%d %d\n%d\n" (I# w) (I# h) (255::Int)
+        flip mapM_ [0..(I# (w*#h-#1#))] $ \i -> do
+          Vec r g b <- VM.unsafeRead c i
+          hPrintf hdl "%d %d %d " (I# (toInt r)) (I# (toInt  g)) (I# (toInt b))
 
-writeXi :: Ptr CUShort -> Int# -> IO ()
-writeXi xi y = do
-  let y' = fromIntegral (I# y)
-  pokeElemOff xi 0 0
-  pokeElemOff xi 1 0
-  pokeElemOff xi 2 (y' * y' * y')
 
-foreign import ccall unsafe "erand48"
-  erand48 :: Ptr CUShort -> IO CDouble
+{-
+double erand48(unsigned short s[3])
+{
+	union {
+		uint64_t u;
+		double f;
+	} x = { 0x3ff0000000000000ULL | __rand48_step(s, __seed48+3)<<4 };
+	return x.f - 1.0;
+}
+double drand48(void){ return erand48(__seed48); }
 
--- erand48' :: Ptr CUShort -> IO Double#
--- erand48' = do (CDouble D# x) <- erand48; return x
+uint64_t __rand48_step(unsigned short *xi, unsigned short *lc)
+{
+	uint64_t a, x;
+	x = xi[0] | xi[1]+0U<<16 | xi[2]+0ULL<<32;
+	a = lc[0] | lc[1]+0U<<16 | lc[2]+0ULL<<32;
+	x = a*x + lc[3];
+	xi[0] = x;
+	xi[1] = x>>16;
+	xi[2] = x>>32;
+	return x & 0xffffffffffffull;
+}
+
+https://github.com/ontio/musl-mirror/blob/7e1c4df4b2f14ab9d156439e9a596ca152c6f50f/src/prng/__seed48.c
+
+unsigned short __seed48[7] = { 0, 0, 0, 0xe66d, 0xdeec, 0x5, 0xb };
+
+-}
+
+
+word2Double# :: Word# -> Double#; word2Double# = undefined
+leftShiftWord# :: Word# -> Word#; leftShiftWord# = undefined
+bitwiseOrWord# :: Word# -> Word#; bitwiseOrWord# = undefined
+
+concatWord# :: Word# -> Word# -> Word# -> Word#
+concatWord# x0 x1 x2 = x0 `or#` (x1 `uncheckedShiftL#` 16#) `or#` (x2 `uncheckedShiftL#` 32#)
+rand48_step# :: Word# -> Word#
+rand48_step# x =
+  let a = concatWord# lc0 lc1 lc2
+      x' = (a `timesWord#` x) `plusWord#` lc3
+      lc0 = 0xe66d##
+      lc1 = 0xdeec##
+      lc2 = 0x5##; lc3 = 0xb##
+  in x `and#` 0xffffffffffff##
+
+erand48 :: TVar Word -> IO Double
+erand48 t = atomically $ do
+  (W# r) <- readTVar t
+  let (# r', d #) = erand48# r
+  writeTVar t (W# r')
+  pure (D# d)
+
+erand48# :: Word# -> (# Word#, Double# #)
+erand48# i =
+  let r = rand48_step# i
+      d_word = (0x3ff0000000000000##) `or#` (r `uncheckedShiftL#` 4#)
+      in (# i, stgWord64ToDouble d_word #)
+
 
 instance Storable Vec where
   sizeOf _ = sizeOf (undefined :: CDouble) * 3
