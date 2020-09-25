@@ -182,67 +182,43 @@ smallpt (I# w) (I# h) nsamps = do
             VM.unsafeWrite c (I# i) (ci `addv` (Vec (clamp rr) (clamp rg) (clamp rb) `mulvs` 0.25##))
             pure r'
 
-  withFile "image-storable.ppm" WriteMode $ \hdl -> do
+  withFile "image.ppm" WriteMode $ \hdl -> do
         hPrintf hdl "P3\n%d %d\n%d\n" (I# w) (I# h) (255::Int)
         flip mapM_ [0..(I# (w*#h-#1#))] $ \i -> do
           Vec r g b <- VM.unsafeRead c i
           hPrintf hdl "%d %d %d " (I# (toInt r)) (I# (toInt  g)) (I# (toInt b))
 
-
-{-
-double erand48(unsigned short s[3])
-{
-	union {
-		uint64_t u;
-		double f;
-	} x = { 0x3ff0000000000000ULL | __rand48_step(s, __seed48+3)<<4 };
-	return x.f - 1.0;
-}
-double drand48(void){ return erand48(__seed48); }
-
-uint64_t __rand48_step(unsigned short *xi, unsigned short *lc)
-{
-	uint64_t a, x;
-	x = xi[0] | xi[1]+0U<<16 | xi[2]+0ULL<<32;
-	a = lc[0] | lc[1]+0U<<16 | lc[2]+0ULL<<32;
-	x = a*x + lc[3];
-	xi[0] = x;
-	xi[1] = x>>16;
-	xi[2] = x>>32;
-	return x & 0xffffffffffffull;
-}
-
-https://github.com/ontio/musl-mirror/blob/7e1c4df4b2f14ab9d156439e9a596ca152c6f50f/src/prng/__seed48.c
-
-unsigned short __seed48[7] = { 0, 0, 0, 0xe66d, 0xdeec, 0x5, 0xb };
-
--}
-
-
-concatWord# :: Word# -> Word# -> Word# -> Word#
-concatWord# x0 x1 x2 = x0 `or#` (x1 `uncheckedShiftL#` 16#) `or#` (x2 `uncheckedShiftL#` 32#)
-rand48_step# :: Word# -> Word#
+-- | returns the full state and the bitmasked value.
+rand48_step# :: Word# -> (# Word#, Word# #)
 rand48_step# x =
   let a = concatWord# lc0 lc1 lc2
       x' = (a `timesWord#` x) `plusWord#` lc3
       lc0 = 0xe66d##
       lc1 = 0xdeec##
-      lc2 = 0x5##; lc3 = 0xb##
-  in x `and#` 0xffffffffffff##
+      lc2 = 0x5##
+      lc3 = 0xb##
+  in (# x', x' `and#` 0xffffffffffff## #)
+{-# INLINE rand48_step# #-}
+
+concatWord# :: Word# -> Word# -> Word# -> Word#
+concatWord# x0 x1 x2 = x0 `or#` (x1 `uncheckedShiftL#` 16#) `or#` (x2 `uncheckedShiftL#` 32#)
+{-# INLINE concatWord# #-}
 
 erand48 :: TVar Word -> IO Double
-erand48 t = pure 0.5-- atomically $ do
-  -- (W# r) <- readTVar t
-  -- let (# r', d #) = erand48# r
-  -- writeTVar t (W# r')
-  -- pure 0.5 -- (D# d)
+erand48 t =  atomically (do
+  (W# r) <- readTVar t
+  let (# r', d #) = erand48# r
+  writeTVar t (W# r')
+  pure (D# d))
+{-# INLINE erand48 #-}
 
 erand48# :: Word# -> (# Word#, Double# #)
-erand48# i =
-  let r = rand48_step# i
-      d_word = (0x3ff0000000000000##) `or#` (r `uncheckedShiftL#` 4#)
-      in (# i, (stgWord64ToDouble d_word) -## 1.0## #)
-
+erand48# s =
+  let
+    (# s', out' #) = (rand48_step# s)
+    d_word = (0x3ff0000000000000##) `or#` (out' `uncheckedShiftL#` 4#)
+  in (# s' , (stgWord64ToDouble d_word) -## 1.0## #)
+{-# INLINE erand48# #-}
 
 instance Storable Vec where
   sizeOf _ = sizeOf (undefined :: CDouble) * 3
