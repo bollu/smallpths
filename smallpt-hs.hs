@@ -1,13 +1,21 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedTuples #-}
 module Main where
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VM
 import Data.List (find, minimumBy, foldl')
 import Data.IORef
+import Data.Word
 import Text.Printf
 import Foreign
 import Foreign.C.Types
 import System.IO (stderr, withFile, IOMode(..))
+import GHC.Conc
+import GHC.Prim
+import GHC.Types hiding (SPEC)
+import Control.Concurrent
+import GHC.Float hiding (clamp)
 -- position, also color (r,g,b)
 data Vec = Vec {-# UNPACK #-} !CDouble {-# UNPACK #-} !CDouble {-# UNPACK #-} !CDouble
 zerov = Vec 0 0 0
@@ -59,7 +67,7 @@ intersects ray = (k, s)
                   (Just y,Just x) | x < y -> (Just x,s)
                   _ -> (k,sp)
 
-radiance :: Ray -> CInt -> Ptr CUShort -> IO Vec
+radiance :: Ray -> CInt -> TVar Word -> IO Vec
 radiance ray@(Ray o d) depth xi = case intersects ray of
   (Nothing,_) -> return zerov
   (Just t,Sphere r p e c refl) -> do
@@ -134,11 +142,11 @@ smallpt w h nsamps = do
       cx = Vec (fromIntegral w * 0.5135 / fromIntegral h) 0 0
       cy = norm (cx `cross` dir) `mulvs` 0.5135
   c <- VM.replicate (w * h) zerov
-  allocaArray 3 $ \xi ->
-      flip mapM_ [0..h-1] $ \y -> do
+  xi <- newTVarIO 0
+  flip mapM_ [0..h-1] $ \y -> do
         --hPrintf stderr "\rRendering (%d spp) %5.2f%%" (samps*4::Int) (100.0*fromIntegral y/(fromIntegral h-1)::Double)
-      writeXi xi y
-      flip mapM_ [0..w-1] $ \x -> do
+   writeXi xi y
+   flip mapM_ [0..w-1] $ \x -> do
         let i = (h-y-1) * w + x
         flip mapM_ [0..1] $ \sy -> do
           flip mapM_ [0..1] $ \sx -> do
@@ -163,15 +171,44 @@ smallpt w h nsamps = do
           Vec r g b <- VM.unsafeRead c i
           hPrintf hdl "%d %d %d " (toInt r) (toInt g) (toInt b)
 
-writeXi :: Ptr CUShort -> Int -> IO ()
-writeXi xi y = do
-  let y' = fromIntegral y
-  pokeElemOff xi 0 0
-  pokeElemOff xi 1 0
-  pokeElemOff xi 2 (y' * y' * y')
+writeXi :: TVar Word -> Int -> IO ()
+writeXi xi (I# y) = atomically $ writeTVar xi (W# (mkErand48Seed# y))
 
-foreign import ccall unsafe "erand48"
-  erand48 :: Ptr CUShort -> IO CDouble
+mkErand48Seed# :: Int# -> Word#
+mkErand48Seed# y = 
+  let yw = int2Word# y; prod = (yw `timesWord#` yw `timesWord#` yw)
+  in concatWord# 0## 0## prod
+
+mkErand48Seed :: Int -> IO (TVar Word)
+mkErand48Seed (I# i) = newTVarIO (W# (mkErand48Seed# i))
+
+concatWord# :: Word# -> Word# -> Word# -> Word#
+concatWord# x0 x1 x2 = x0 `or#` (x1 `uncheckedShiftL#` 16#) `or#` (x2 `uncheckedShiftL#` 32#)
+
+-- | returns the full state and the bitmasked value.
+rand48_step# :: Word# -> (# Word#, Word# #)
+rand48_step# x =
+  let a = concatWord# lc0 lc1 lc2
+      x' = (a `timesWord#` x) `plusWord#` lc3
+      lc0 = 0xe66d##
+      lc1 = 0xdeec##
+      lc2 = 0x5##
+      lc3 = 0xb##
+  in (# x', x' `and#` 0xffffffffffff## #)
+
+erand48# :: Word# -> (# Word#, Double# #)
+erand48# s =
+  let (# s', out' #) = (rand48_step# s)
+      d_word = (0x3ff0000000000000##) `or#`
+               (out' `uncheckedShiftL#` 4#)
+  in (# s' , (stgWord64ToDouble d_word) -## 1.0## #)
+
+erand48 :: TVar Word -> IO CDouble
+erand48 t =  atomically (do
+  (W# r) <- readTVar t
+  let (# r', d #) = erand48# r
+  writeTVar t (W# r')
+  pure $ CDouble (D# d))
 
 instance Storable Vec where
   sizeOf _ = sizeOf (undefined :: CDouble) * 3
