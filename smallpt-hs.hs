@@ -3,7 +3,7 @@
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UnboxedTuples #-}
-module Main where
+module Main (main) where
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VM
 import Data.List (find, minimumBy, foldl')
@@ -23,11 +23,13 @@ data Vec = Vec {-# UNPACK #-} !Double {-# UNPACK #-} !Double {-# UNPACK #-} !Dou
 zerov = Vec 0 0 0
 addv (Vec a b c) (Vec x y z) = Vec (a+x) (b+y) (c+z)
 subv (Vec a b c) (Vec x y z) = Vec (a-x) (b-y) (c-z)
+{-# INLINE subv #-}
 mulvs (Vec a b c) x = Vec (a*x) (b*x) (c*x)
 mulv (Vec a b c) (Vec x y z) = Vec (a*x) (b*y) (c*z)
 len (Vec a b c) = sqrt $ a*a+b*b+c*c
 norm v = v `mulvs` (1/len v)
 dot (Vec a b c) (Vec x y z) = a*x+b*y+c*z
+{-# INLINE dot #-}
 cross (Vec a b c) (Vec x y z) = Vec (b*z-c*y) (c*x-a*z) (a*y-b*x)
 maxv (Vec a b c) = maximum [a,b,c]
 
@@ -42,14 +44,21 @@ pattern REFR = Refl 2
 -- radius, position, emission, color, reflection
 data Sphere = Sphere {-# UNPACK #-} !Double {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Refl
 
-intersect (Ray o d) (Sphere r p e c refl) =
+intersect !(Ray o d) !(Sphere r p e c refl) =
   if det<0 then (1/0.0) else f (b-sdet) (b+sdet)
-  where op = p `subv` o
-        eps = 1e-4
-        b = op `dot` d
-        det = b*b - (op `dot` op) + r*r
-        sdet = sqrt det
-        f a b = if a>eps then a else if b>eps then b else (1/0.0)
+  where !op = p `subv` o
+        {-# INLINE op #-}
+        !eps = 1e-4
+        {-# INLINE eps #-}
+        !b = op `dot` d
+        {-# INLINE b #-}
+        !det = b*b - (op `dot` op) + r*r
+        {-# INLINE det #-}
+        !sdet = sqrt det
+        {-# INLINE sdet #-}
+        f !a !b = if a>eps then a else if b>eps then b else (1/0.0)
+        {-# INLINE f #-}
+{-# INLINE intersect #-}
 
 clamp x = if x<0 then 0 else if x>1 then 1 else x
 
@@ -57,8 +66,7 @@ toInt :: Double -> Int
 toInt x = floor $ clamp x ** (1/2.2) * 255 + 0.5
 
 intersects ray = 
-    let (# k', s' #) = f (f (f (f (f (f (f (f (# intersect ray sphLeft, sphLeft #) sphRight) sphBack) sphFrnt) sphBotm) sphTop) sphMirr) sphGlas) sphLite
-    in (k', s')
+    f (f (f (f (f (f (f (f (# intersect ray sphLeft, sphLeft #) sphRight) sphBack) sphFrnt) sphBotm) sphTop) sphMirr) sphGlas) sphLite
   where
     f !(# !k,!sp #) !s =
       let x = intersect ray s in if x < k then (# x,s #)  else (# k,sp #)
@@ -75,8 +83,8 @@ sphLite  = Sphere 600  (Vec 50 (681.6-0.27) 81.6) (Vec 12 12 12)       zerov DIF
 
 radiance :: Ray -> CInt -> TVar Word -> IO Vec
 radiance ray@(Ray o d) depth xi = case intersects ray of
-  (t,_) | t == (1/0.0) -> return zerov
-  (t,Sphere r p e c refl) -> do
+  (# t, _ #) | t == (1/0.0) -> return zerov
+  (# t,Sphere r p e c refl #) -> do
     let x = o `addv` (d `mulvs` t)
         n = norm $ x `subv` p
         nl = if n `dot` d < 0 then n else n `mulvs` (-1)
