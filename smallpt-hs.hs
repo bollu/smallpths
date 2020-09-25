@@ -1,5 +1,7 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE MagicHash #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UnboxedTuples #-}
 module Main where
 import qualified Data.Vector as V
@@ -17,7 +19,7 @@ import GHC.Types hiding (SPEC)
 import Control.Concurrent
 import GHC.Float hiding (clamp)
 -- position, also color (r,g,b)
-data Vec = Vec {-# UNPACK #-} !CDouble {-# UNPACK #-} !CDouble {-# UNPACK #-} !CDouble
+data Vec = Vec {-# UNPACK #-} !Double {-# UNPACK #-} !Double {-# UNPACK #-} !Double
 zerov = Vec 0 0 0
 addv (Vec a b c) (Vec x y z) = Vec (a+x) (b+y) (c+z)
 subv (Vec a b c) (Vec x y z) = Vec (a-x) (b-y) (c-z)
@@ -29,48 +31,52 @@ dot (Vec a b c) (Vec x y z) = a*x+b*y+c*z
 cross (Vec a b c) (Vec x y z) = Vec (b*z-c*y) (c*x-a*z) (a*y-b*x)
 maxv (Vec a b c) = maximum [a,b,c]
 
-data Ray = Ray Vec Vec -- origin, direction
+data Ray = Ray {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec -- origin, direction
 
-data Refl = DIFF | SPEC | REFR -- material types, used in radiance
+newtype Refl = Refl Int  -- material types, used in radiance
+
+pattern DIFF = Refl 0
+pattern SPEC = Refl 1
+pattern REFR = Refl 2
 
 -- radius, position, emission, color, reflection
-data Sphere = Sphere CDouble Vec Vec Vec Refl
+data Sphere = Sphere {-# UNPACK #-} !Double {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Refl
+
 intersect (Ray o d) (Sphere r p e c refl) =
-  if det<0 then Nothing else f (b-sdet) (b+sdet)
+  if det<0 then (1/0.0) else f (b-sdet) (b+sdet)
   where op = p `subv` o
         eps = 1e-4
         b = op `dot` d
         det = b*b - (op `dot` op) + r*r
         sdet = sqrt det
-        f a b = if a>eps then Just a else if b>eps then Just b else Nothing
-
-spheres = let s = Sphere ; z = zerov ; (*) = mulvs ; v = Vec in
-  [ s 1e5 (v (1e5+1) 40.8 81.6)    z (v 0.75 0.25 0.25) DIFF --Left
-  , s 1e5 (v (-1e5+99) 40.8 81.6)  z (v 0.25 0.25 0.75) DIFF --Rght
-  , s 1e5 (v 50 40.8 1e5)          z (v 0.75 0.75 0.75) DIFF --Back
-  , s 1e5 (v 50 40.8 (-1e5+170))   z z                  DIFF --Frnt
-  , s 1e5 (v 50 1e5 81.6)          z (v 0.75 0.75 0.75) DIFF --Botm
-  , s 1e5 (v 50 (-1e5+81.6) 81.6)  z (v 0.75 0.75 0.75) DIFF --Top
-  , s 16.5(v 27 16.5 47)           z ((v 1 1 1)* 0.999) SPEC --Mirr
-  , s 16.5(v 73 16.5 78)           z ((v 1 1 1)* 0.999) REFR --Glas
-  , s 600 (v 50 (681.6-0.27) 81.6) (v 12 12 12)       z DIFF]--Lite
+        f a b = if a>eps then a else if b>eps then b else (1/0.0)
 
 clamp x = if x<0 then 0 else if x>1 then 1 else x
 
-toInt :: CDouble -> Int
+toInt :: Double -> Int
 toInt x = floor $ clamp x ** (1/2.2) * 255 + 0.5
 
-intersects ray = (k, s)
-  where (k,s) = foldl' f (Nothing,undefined) spheres
-        f (k,sp) s = case (k,intersect ray s) of
-                  (Nothing,Just x) -> (Just x,s)
-                  (Just y,Just x) | x < y -> (Just x,s)
-                  _ -> (k,sp)
+intersects ray = 
+    let (# k', s' #) = f (f (f (f (f (f (f (f (# intersect ray sphLeft, sphLeft #) sphRight) sphBack) sphFrnt) sphBotm) sphTop) sphMirr) sphGlas) sphLite
+    in (k', s')
+  where
+    f !(# !k,!sp #) !s =
+      let x = intersect ray s in if x < k then (# x,s #)  else (# k,sp #)
+
+sphLeft  = Sphere 1e5  (Vec (1e5+1) 40.8 81.6)    zerov (Vec 0.75 0.25 0.25) DIFF --Left
+sphRight = Sphere 1e5  (Vec (-1e5+99) 40.8 81.6)  zerov (Vec 0.25 0.25 0.75) DIFF --Rght
+sphBack  = Sphere 1e5  (Vec 50 40.8 1e5)          zerov (Vec 0.75 0.75 0.75) DIFF --Back
+sphFrnt  = Sphere 1e5  (Vec 50 40.8 (-1e5+170))   zerov zerov              DIFF --Frnt
+sphBotm  = Sphere 1e5  (Vec 50 1e5 81.6)          zerov (Vec 0.75 0.75 0.75) DIFF --Botm
+sphTop   = Sphere 1e5  (Vec 50 (-1e5+81.6) 81.6)  zerov (Vec 0.75 0.75 0.75) DIFF --Top
+sphMirr  = Sphere 16.5 (Vec 27 16.5 47)           zerov (Vec 0.999 0.999 0.999) SPEC --Mirr
+sphGlas  = Sphere 16.5 (Vec 73 16.5 78)           zerov (Vec 0.999 0.999 0.999) REFR --Glas
+sphLite  = Sphere 600  (Vec 50 (681.6-0.27) 81.6) (Vec 12 12 12)       zerov DIFF --Lite
 
 radiance :: Ray -> CInt -> TVar Word -> IO Vec
 radiance ray@(Ray o d) depth xi = case intersects ray of
-  (Nothing,_) -> return zerov
-  (Just t,Sphere r p e c refl) -> do
+  (t,_) | t == (1/0.0) -> return zerov
+  (t,Sphere r p e c refl) -> do
     let x = o `addv` (d `mulvs` t)
         n = norm $ x `subv` p
         nl = if n `dot` d < 0 then n else n `mulvs` (-1)
@@ -203,16 +209,16 @@ erand48# s =
                (out' `uncheckedShiftL#` 4#)
   in (# s' , (stgWord64ToDouble d_word) -## 1.0## #)
 
-erand48 :: TVar Word -> IO CDouble
+erand48 :: TVar Word -> IO Double
 erand48 t =  atomically (do
   (W# r) <- readTVar t
   let (# r', d #) = erand48# r
   writeTVar t (W# r')
-  pure $ CDouble (D# d))
+  pure (D# d))
 
 instance Storable Vec where
-  sizeOf _ = sizeOf (undefined :: CDouble) * 3
-  alignment _ = alignment (undefined :: CDouble)
+  sizeOf _ = sizeOf (undefined :: Double) * 3
+  alignment _ = alignment (undefined :: Double)
  
   {-# INLINE peek #-}
   peek p = do
