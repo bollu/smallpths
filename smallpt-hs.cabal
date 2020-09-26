@@ -25,4 +25,4 @@ executable smallpt-hs
                        vector
 
   -- no -Wall as type signature are purposely missing
-  ghc-options:         -O2
+  ghc-options:         -O2 -rtsopts -fllvm

@@ -4,8 +4,10 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UnboxedTuples #-}
 module Main (main) where
+-- import qualified Data.Array.Unboxed as A
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VM
+import Control.Monad
 import Data.List (find, minimumBy, foldl')
 import Data.IORef
 import Data.IORef.Unboxed
@@ -28,7 +30,8 @@ subv (Vec a b c) (Vec x y z) = Vec (a-x) (b-y) (c-z)
 mulvs (Vec a b c) x = Vec (a*x) (b*x) (c*x)
 mulv (Vec a b c) (Vec x y z) = Vec (a*x) (b*y) (c*z)
 len (Vec a b c) = sqrt $ a*a+b*b+c*c
-norm v = v `mulvs` (1/len v)
+norm (Vec !(D# a) !(D# b) !(D# c)) = let !reciplen = 1.0## /## (sqrtDouble# (a*##a+##b*##b+##c*##c)) in
+   Vec (D# (a*##reciplen)) (D# (b*##reciplen)) (D# (c*##reciplen))
 dot (Vec a b c) (Vec x y z) = a*x+b*y+c*z
 cross (Vec a b c) (Vec x y z) = Vec (b*z-c*y) (c*x-a*z) (a*y-b*x)
 maxv (Vec a b c) = max a (max b c)
@@ -149,34 +152,33 @@ radiance ray@(Ray o d) depth xi = case intersects ray of
       else continue c
 
 smallpt :: Int -> Int -> Int -> IO ()
-smallpt w h nsamps = do
-  let samps = nsamps `div` 4
-      org = Vec 50 52 295.6
-      dir = norm $ Vec 0 (-0.042612) (-1)
-      cx = Vec (fromIntegral w * 0.5135 / fromIntegral h) 0 0
-      cy = norm (cx `cross` dir) `mulvs` 0.5135
-  c <- VM.replicate (w * h) zerov
-  xi <- newIORefU 0
-  flip mapM_ [0..h-1] $ \y -> do
+smallpt !w !h !nsamps = do
+  let !samps = nsamps `div` 4
+      !org = Vec 50 52 295.6
+      !dir = norm $ Vec 0 (-0.042612) (-1)
+      !cx = Vec (fromIntegral w * 0.5135 / fromIntegral h) 0 0
+      !cy = norm (cx `cross` dir) `mulvs` 0.5135
+  !c <- VM.replicate (w * h) zerov
+  !xi <- newIORefU 0
+  flip mapM_ [0..h-1] $ \ !y -> do
         --hPrintf stderr "\rRendering (%d spp) %5.2f%%" (samps*4::Int) (100.0*fromIntegral y/(fromIntegral h-1)::Double)
    writeXi xi y
-   flip mapM_ [0..w-1] $ \x -> do
-        let i = (h-y-1) * w + x
+   flip mapM_ [0..w-1] $ \ !x -> do
+        let !i = (h-y-1) * w + x
         flip mapM_ [0..1] $ \sy -> do
-          flip mapM_ [0..1] $ \sx -> do
-            r <- newIORef zerov
-            flip mapM_ [0..samps-1] $ \s -> do
-              r1 <- (2*) `fmap` erand48 xi
-              let dx = if r1<1 then sqrt r1-1 else 1-sqrt(2-r1)
-              r2 <- (2*) `fmap` erand48 xi
-              let dy = if r2<1 then sqrt r2-1 else 1-sqrt(2-r2)
-                  d = (cx `mulvs` (((sx + 0.5 + dx)/2 + fromIntegral x)/fromIntegral w - 0.5)) `addv`
+          flip mapM_ [0..1] $ \ !sx -> do
+            Vec rr rg rb <- (\f -> foldM f zerov [0..samps-1]) $ \ !r !s -> do
+              !r1 <- (2*) `fmap` erand48 xi
+              let !dx = if r1<1 then sqrt r1-1 else 1-sqrt(2-r1)
+              !r2 <- (2*) `fmap` erand48 xi
+              let !dy = if r2<1 then sqrt r2-1 else 1-sqrt(2-r2)
+                  !d = (cx `mulvs` (((sx + 0.5 + dx)/2 + fromIntegral x)/fromIntegral w - 0.5)) `addv`
                       (cy `mulvs` (((sy + 0.5 + dy)/2 + fromIntegral y)/fromIntegral h - 0.5)) `addv` dir
-              rad <- radiance (Ray (org`addv`(d`mulvs`140)) (norm d)) 0 xi
+              !rad <- radiance (Ray (org`addv`(d`mulvs`140)) (norm d)) 0 xi
               -- Camera rays are pushed forward ^^^^^ to start in interior
-              modifyIORef r (`addv` (rad `mulvs` (1 / fromIntegral samps)))
-            ci <- VM.unsafeRead c i
-            Vec rr rg rb <- readIORef r
+              let !r' = (r `addv` (rad `mulvs` (1 / fromIntegral samps)))
+              pure r'
+            !ci <- VM.unsafeRead c i
             VM.unsafeWrite c i $ ci `addv` (Vec (clamp rr) (clamp rg) (clamp rb) `mulvs` 0.25)
 
   withFile "image.ppm" WriteMode $ \hdl -> do
