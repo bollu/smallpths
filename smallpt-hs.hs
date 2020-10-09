@@ -8,9 +8,11 @@ module Main (main) where
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VM
 import Control.Monad
+import Control.Monad.Primitive
 import Data.List (find, minimumBy, foldl')
 import Data.IORef
 import Data.IORef.Unboxed
+import Data.Primitive.ByteArray
 import Data.Word
 import Text.Printf
 import Foreign
@@ -23,6 +25,88 @@ import Control.Concurrent
 import GHC.Float hiding (clamp)
 -- position, also color (r,g,b)
 data Vec = Vec {-# UNPACK #-} !Double {-# UNPACK #-} !Double {-# UNPACK #-} !Double
+
+newtype VecM = VecM (MutableByteArray (PrimState IO))
+
+vec2vecM :: Vec -> IO VecM
+vec2vecM (Vec a b c) = newVecM a b c
+
+writeVecM :: VecM -> Double -> Double -> Double -> IO ()
+writeVecM (VecM arr) a b c = do
+  writeByteArray arr 0 a
+  writeByteArray arr 1 b
+  writeByteArray arr 2 c
+
+readVecM :: VecM -> IO (Double, Double, Double)
+readVecM (VecM v) = do
+  a <- readByteArray v 0
+  b <- readByteArray v 1
+  c <- readByteArray v 2
+  pure (a, b, c)
+  
+newVecM :: Double -> Double -> Double -> IO VecM
+newVecM a b c = do
+  v <- VecM <$> newByteArray 3
+  writeVecM v a b c
+  pure v
+
+liftVecM :: (Double -> Double -> Double) -> VecM -> VecM -> VecM -> IO ()
+liftVecM !f !(VecM !v1) !(VecM !v2) !(VecM !v3) = do
+  writeByteArray v3 0 =<< ((f) <$> readByteArray v1 0 <*> readByteArray v2 0)
+  writeByteArray v3 1 =<< ((f) <$> readByteArray v1 1 <*> readByteArray v2 1)
+  writeByteArray v3 2 =<< ((f) <$> readByteArray v1 2 <*> readByteArray v2 2)
+
+
+-- | Sid: is this safe?
+zerovM :: VecM
+zerovM = unsafeInlinePrim $ newVecM 0 0 0
+
+addvM :: VecM -> VecM -> VecM -> IO ()
+addvM = liftVecM (+)
+
+subvM :: VecM -> VecM -> VecM -> IO ()
+subvM = liftVecM (-)
+
+mulvsM :: VecM -> Double -> IO ()
+mulvsM !(VecM !v) !x = do
+  writeByteArray v 0 =<< ((*) <$> readByteArray v 0 <*> pure x)
+  writeByteArray v 1 =<< ((*) <$> readByteArray v 1 <*> pure x)
+  writeByteArray v 1 =<< ((*) <$> readByteArray v 2 <*> pure x)
+
+mulvM :: VecM -> VecM -> VecM -> IO ()
+mulvM = liftVecM (*)
+
+lenM :: VecM -> IO Double
+lenM !(VecM !v) = do
+  a <- readByteArray v 0
+  b <- readByteArray v 1
+  c <- readByteArray v 2
+  pure (sqrt(a*a + b*b + c*c))
+
+normM :: VecM -> VecM -> IO ()
+normM !(VecM !v) !w = do
+  a <- readByteArray v 0
+  b <- readByteArray v 1
+  c <- readByteArray v 2
+  let !reciplen = 1.0 / (sqrtDouble (a*a+b*b+c*c))
+  writeVecM w a b c
+
+dotM :: VecM -> VecM -> IO Double
+dotM v w = do
+  (a, b, c) <- readVecM v
+  (x, y, z) <- readVecM w
+  pure (a*x+b*y+c*z)
+
+crossM :: VecM -> VecM -> VecM -> IO ()
+crossM v w o = do
+  (a, b, c) <- readVecM v
+  (x, y, z) <- readVecM w
+  writeVecM o (b*z-c*y) (c*x-a*z) (a*y-b*x)
+  
+maxvM :: VecM -> IO Double
+maxvM v = do
+  (a, b, c) <- readVecM v
+  pure (max a (max b c))
 
 zerov = Vec 0 0 0
 addv (Vec a b c) (Vec x y z) = Vec (a+x) (b+y) (c+z)

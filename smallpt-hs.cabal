@@ -21,6 +21,7 @@ executable smallpt-hs
 
   build-depends:       base >= 4 && < 5,
                        ghc-prim,
+                       primitive,
                        unboxed-ref,
                        vector
 
