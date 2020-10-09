@@ -61,6 +61,12 @@ liftVecM !f !(VecM !v1) !(VecM !v2) !(VecM !v3) = do
   writeByteArray v3 1 =<< ((f) <$> readByteArray v1 1 <*> readByteArray v2 1)
   writeByteArray v3 2 =<< ((f) <$> readByteArray v1 2 <*> readByteArray v2 2)
 
+-- | strcpy ordering of arguments
+copyVecM :: VecM -> VecM  -> IO ()
+copyVecM !(VecM !dst) !(VecM !src) = do
+  writeByteArray dst 0 =<< (readByteArray src 0 :: IO Double)
+  writeByteArray dst 1 =<< (readByteArray src 1 :: IO Double)
+  writeByteArray dst 2 =<< (readByteArray src 2 :: IO Double)
 
 -- | Sid: is this safe?
 zerovM :: VecM
@@ -225,7 +231,6 @@ sphMirrM :: SphereM;  sphMirrM = unsafeInlinePrim (sphere2sphereM sphBack)
 sphGlasM :: SphereM;  sphGlasM = unsafeInlinePrim (sphere2sphereM sphBack)
 sphLiteM :: SphereM;  sphLiteM = unsafeInlinePrim (sphere2sphereM sphBack)
 
-
 radiance :: Ray -> CInt -> IORefU Word -> IO Vec
 radiance ray@(Ray o d) depth xi = case intersects ray of
   (# !t, _ #) | t == (1/0.0) -> return zerov
@@ -292,6 +297,87 @@ radiance ray@(Ray o d) depth xi = case intersects ray of
         if er < pr then continue $ c `mulvs` (1/pr)
                   else return e
       else continue c
+
+radianceM :: Ray -> CInt -> IORefU Word -> VecM -> IO ()
+radianceM ray@(Ray o d) depth xi dest = case intersects ray of
+  (# !t, _ #) | t == (1/0.0) -> writeVecM dest 0 0 0
+  (# !t, !Sphere r p e c refl #) -> do
+    let !x = o `addv` (d `mulvs` t)
+        !n = norm $ x `subv` p
+        !nl = if n `dot` d < 0 then n else n `mulvs` (-1)
+        !pr = maxv c
+        !depth' = depth + 1
+        continue :: Vec -> IO ()
+        continue !f = case refl of
+          DIFF -> do
+            !r1 <- ((2*pi)*) `fmap` erand48 xi
+            !r2 <- erand48 xi
+            let !r2s = sqrt r2
+                !w@(Vec !wx _ _) = nl
+                !u = norm $ (if abs wx > 0.1 then (Vec 0 1 0) else (Vec 1 0 0)) `cross` w
+                !v = w `cross` u
+                !d' = norm $ (u`mulvs`(cos r1*r2s)) `addv` (v`mulvs`(sin r1*r2s)) `addv` (w`mulvs`sqrt (1-r2))
+            !rad <- radiance (Ray x d') depth' xi
+            -- return $ e `addv` (f `mulv` rad)
+            o <- vec2vecM (e `addv` (f `mulv` rad))
+            copyVecM dest o
+
+          SPEC -> do
+            let !d' = d `subv` (n `mulvs` (2 * (n`dot`d)))
+            !rad <- radiance (Ray x d') depth' xi
+            -- return $ e `addv` (f `mulv` rad)
+            o <- vec2vecM (e `addv` (f `mulv` rad))
+            copyVecM dest o
+             
+
+          REFR -> do
+            let !reflRay = Ray x (d `subv` (n `mulvs` (2* n`dot`d))) -- Ideal dielectric REFRACTION
+                !into = n`dot`nl > 0                -- Ray from outside going in?
+                !nc = 1
+                !nt = 1.5
+                !nnt = if into then nc/nt else nt/nc
+                !ddn= d`dot`nl
+                !cos2t = 1-nnt*nnt*(1-ddn*ddn)
+            if cos2t<0    -- Total internal reflection
+              then do
+                !rad <- radiance reflRay depth' xi
+                -- return $ e `addv` (f `mulv` rad)
+                o <- vec2vecM (e `addv` (f `mulv` rad))
+                copyVecM dest o
+              else do
+                let !tdir = norm $ (d`mulvs`nnt `subv` (n`mulvs`((if into then 1 else -1)*(ddn*nnt+sqrt cos2t))))
+                    !a=nt-nc
+                    !b=nt+nc
+                    !r0=a*a/(b*b)
+                    !c = 1-(if into then -ddn else tdir`dot`n)
+                    !re=r0+(1-r0)*c*c*c*c*c
+                    !tr=1-re
+                    !pp=0.25+0.5*re
+                    !rp=re/pp
+                    !tp=tr/(1-pp)
+                !rad <-
+                  if depth>2
+                    then do !er <- erand48 xi
+                            if er<pp -- Russian roulette
+                              then (`mulvs` rp) `fmap` radiance reflRay depth' xi
+                              else (`mulvs` tp) `fmap` radiance (Ray x tdir) depth' xi
+                    else do !rad0 <- (`mulvs` re) `fmap` radiance reflRay depth' xi
+                            !rad1 <- (`mulvs` tr) `fmap` radiance(Ray x tdir) depth' xi
+                            return $ rad0 `addv` rad1
+                -- return $ e `addv` (f `mulv` rad)
+                o <- vec2vecM (e `addv` (f `mulv` rad))
+                copyVecM dest o
+
+    if depth'>5
+      then do
+        !er <- erand48 xi
+        if er < pr then continue $ c `mulvs` (1/pr)
+                  else do -- return e
+                     o <- vec2vecM e
+                     copyVecM dest o
+      else continue c
+
+
 
 smallpt :: Int -> Int -> Int -> IO ()
 smallpt !w !h !nsamps = do
