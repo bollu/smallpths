@@ -31,6 +31,12 @@ newtype VecM = VecM (MutableByteArray (PrimState IO))
 vec2vecM :: Vec -> IO VecM
 vec2vecM (Vec a b c) = newVecM a b c
 
+vecM2vec :: VecM -> IO Vec
+vecM2vec v = do
+  (a, b, c) <- readVecM v
+  pure (Vec a b c)
+
+
 writeVecM :: VecM -> Double -> Double -> Double -> IO ()
 writeVecM (VecM arr) a b c = do
   writeByteArray arr 0 a
@@ -231,6 +237,7 @@ sphMirrM :: SphereM;  sphMirrM = unsafeInlinePrim (sphere2sphereM sphBack)
 sphGlasM :: SphereM;  sphGlasM = unsafeInlinePrim (sphere2sphereM sphBack)
 sphLiteM :: SphereM;  sphLiteM = unsafeInlinePrim (sphere2sphereM sphBack)
 
+
 radiance :: Ray -> CInt -> IORefU Word -> IO Vec
 radiance ray@(Ray o d) depth xi = case intersects ray of
   (# !t, _ #) | t == (1/0.0) -> return zerov
@@ -378,7 +385,6 @@ radianceM ray@(Ray o d) depth xi dest = case intersects ray of
       else continue c
 
 
-
 smallpt :: Int -> Int -> Int -> IO ()
 smallpt !w !h !nsamps = do
   let !samps = nsamps `div` 4
@@ -414,6 +420,47 @@ smallpt !w !h !nsamps = do
         flip mapM_ [0..w*h-1] $ \i -> do
           Vec r g b <- VM.unsafeRead c i
           hPrintf hdl "%d %d %d " (toInt r) (toInt g) (toInt b)
+
+smallptM :: Int -> Int -> Int -> IO ()
+smallptM !w !h !nsamps = do
+  let !samps = nsamps `div` 4
+      !org = Vec 50 52 295.6
+      !dir = norm $ Vec 0 (-0.042612) (-1)
+      !cx = Vec (fromIntegral w * 0.5135 / fromIntegral h) 0 0
+      !cy = norm (cx `cross` dir) `mulvs` 0.5135
+  !c <- VM.replicate (w * h) zerov
+  !xi <- newIORefU 0
+  flip mapM_ [0..h-1] $ \ !y -> do
+        --hPrintf stderr "\rRendering (%d spp) %5.2f%%" (samps*4::Int) (100.0*fromIntegral y/(fromIntegral h-1)::Double)
+   writeXi xi y
+   flip mapM_ [0..w-1] $ \ !x -> do
+        let !i = (h-y-1) * w + x
+        flip mapM_ [0..1] $ \sy -> do
+          flip mapM_ [0..1] $ \ !sx -> do
+            Vec rr rg rb <- (\f -> foldM f zerov [0..samps-1]) $ \ !r !s -> do
+              !r1 <- (2*) `fmap` erand48 xi
+              let !dx = if r1<1 then sqrt r1-1 else 1-sqrt(2-r1)
+              !r2 <- (2*) `fmap` erand48 xi
+              let !dy = if r2<1 then sqrt r2-1 else 1-sqrt(2-r2)
+                  !d = (cx `mulvs` (((sx + 0.5 + dx)/2 + fromIntegral x)/fromIntegral w - 0.5)) `addv`
+                      (cy `mulvs` (((sy + 0.5 + dy)/2 + fromIntegral y)/fromIntegral h - 0.5)) `addv` dir
+              -- !rad <- radiance (Ray (org`addv`(d`mulvs`140)) (norm d)) 0 xi
+              radM <- newUndefVecM
+              radianceM (Ray (org`addv`(d`mulvs`140)) (norm d)) 0 xi radM
+              rad <- vecM2vec radM
+              -- Camera rays are pushed forward ^^^^^ to start in interior
+              let !r' = (r `addv` (rad `mulvs` (1 / fromIntegral samps)))
+              pure r'
+            !ci <- VM.unsafeRead c i
+            VM.unsafeWrite c i $ ci `addv` (Vec (clamp rr) (clamp rg) (clamp rb) `mulvs` 0.25)
+
+  withFile "image.ppm" WriteMode $ \hdl -> do
+        hPrintf hdl "P3\n%d %d\n%d\n" w h (255::Int)
+        flip mapM_ [0..w*h-1] $ \i -> do
+          Vec r g b <- VM.unsafeRead c i
+          hPrintf hdl "%d %d %d " (toInt r) (toInt g) (toInt b)
+
+
 
 writeXi :: IORefU Word -> Int -> IO ()
 writeXi !xi !(I# y) = writeIORefU xi (W# (mkErand48Seed# y))
@@ -483,4 +530,4 @@ instance Storable Vec where
     q = castPtr p
 
 main :: IO ()
-main = smallpt 200 200 256
+main = smallptM 200 200 256
