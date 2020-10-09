@@ -43,7 +43,12 @@ readVecM (VecM v) = do
   b <- readByteArray v 1
   c <- readByteArray v 2
   pure (a, b, c)
-  
+
+newUndefVecM :: IO VecM
+newUndefVecM = do
+  v <- VecM <$> newByteArray 3
+  pure v
+
 newVecM :: Double -> Double -> Double -> IO VecM
 newVecM a b c = do
   v <- VecM <$> newByteArray 3
@@ -122,6 +127,11 @@ maxv (Vec a b c) = max a (max b c)
 
 data Ray = Ray {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec -- origin, direction
 
+data RayM = RayM {-# UNPACK #-} !VecM {-# UNPACK #-} !VecM -- origin, direction
+
+ray2rayM :: Ray -> IO RayM
+ray2rayM (Ray o d) = RayM <$> vec2vecM o <*> vec2vecM d
+
 newtype Refl = Refl Int  -- material types, used in radiance
 
 pattern DIFF = Refl 0
@@ -130,6 +140,11 @@ pattern REFR = Refl 2
 
 -- radius, position, emission, color, reflection
 data Sphere = Sphere {-# UNPACK #-} !Double {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Vec {-# UNPACK #-} !Refl
+
+data SphereM = SphereM {-# UNPACK #-} !Double {-# UNPACK #-} !VecM {-# UNPACK #-} !VecM {-# UNPACK #-} !VecM {-# UNPACK #-} !Refl
+
+sphere2sphereM :: Sphere -> IO SphereM
+sphere2sphereM (Sphere r p e c rf) = (SphereM r) <$> vec2vecM p <*> vec2vecM e <*> vec2vecM c <*> pure rf
 
 intersect !(Ray o d) !(Sphere r p e c refl) =
   if det<0 then (1/0.0) else f (b-sdet) (b+sdet)
@@ -147,6 +162,21 @@ intersect !(Ray o d) !(Sphere r p e c refl) =
         {-# INLINE f #-}
 {-# INLINE intersect #-}
 
+intersectM :: RayM -> SphereM -> IO Double
+intersectM !(RayM o d) !(SphereM r p e c refl) = do
+  !op <- newUndefVecM
+  subvM p o op
+  !b <- op `dotM` d
+  !opop <- op `dotM` op
+  let !det = b*b - opop + r*r
+  let !sdet = sqrt det
+  pure (if det<0 then (1/0.0) else f (b-sdet) (b+sdet))
+  where
+    !eps = 1e-4
+    f !a !b = if a>eps then a else if b>eps then b else (1/0.0)
+    {-# INLINE f #-}
+{-# INLINE intersectM #-}
+
 clamp x = if x<0 then 0 else if x>1 then 1 else x
 
 toInt :: Double -> Int
@@ -158,6 +188,23 @@ intersects ray =
     f !(# !k,!sp #) !s =
       let x = intersect ray s in if x < k then (# x,s #)  else (# k,sp #)
 
+intersectsM :: RayM -> IO ( Double, SphereM )
+intersectsM ray = do
+    d <- intersectM ray sphLeftM
+    o <- f (d, sphLeftM) sphRightM
+    o <- f o sphBackM
+    o <- f o sphFrntM
+    o <- f o sphBotmM
+    o <- f o sphTopM
+    o <- f o sphMirrM
+    o <- f o sphGlasM
+    o <- f o sphLiteM
+    return o
+  where
+    f !( !k,!sp ) !s = do
+        x <- intersectM ray s
+        pure (if x < k then (x, s)  else (k, sp))
+
 sphLeft  = Sphere 1e5  (Vec (1e5+1) 40.8 81.6)    zerov (Vec 0.75 0.25 0.25) DIFF --Left
 sphRight = Sphere 1e5  (Vec (-1e5+99) 40.8 81.6)  zerov (Vec 0.25 0.25 0.75) DIFF --Rght
 sphBack  = Sphere 1e5  (Vec 50 40.8 1e5)          zerov (Vec 0.75 0.75 0.75) DIFF --Back
@@ -167,6 +214,17 @@ sphTop   = Sphere 1e5  (Vec 50 (-1e5+81.6) 81.6)  zerov (Vec 0.75 0.75 0.75) DIF
 sphMirr  = Sphere 16.5 (Vec 27 16.5 47)           zerov (Vec 0.999 0.999 0.999) SPEC --Mirr
 sphGlas  = Sphere 16.5 (Vec 73 16.5 78)           zerov (Vec 0.999 0.999 0.999) REFR --Glas
 sphLite  = Sphere 600  (Vec 50 (681.6-0.27) 81.6) (Vec 12 12 12)       zerov DIFF --Lite
+
+sphLeftM :: SphereM;  sphLeftM = unsafeInlinePrim (sphere2sphereM sphLeft)
+sphRightM :: SphereM; sphRightM = unsafeInlinePrim (sphere2sphereM sphRight)
+sphBackM :: SphereM;  sphBackM = unsafeInlinePrim (sphere2sphereM sphBack)
+sphFrntM :: SphereM;  sphFrntM = unsafeInlinePrim (sphere2sphereM sphBack)
+sphBotmM :: SphereM;  sphBotmM = unsafeInlinePrim (sphere2sphereM sphBack)
+sphTopM :: SphereM;   sphTopM  = unsafeInlinePrim (sphere2sphereM sphBack)
+sphMirrM :: SphereM;  sphMirrM = unsafeInlinePrim (sphere2sphereM sphBack)
+sphGlasM :: SphereM;  sphGlasM = unsafeInlinePrim (sphere2sphereM sphBack)
+sphLiteM :: SphereM;  sphLiteM = unsafeInlinePrim (sphere2sphereM sphBack)
+
 
 radiance :: Ray -> CInt -> IORefU Word -> IO Vec
 radiance ray@(Ray o d) depth xi = case intersects ray of
