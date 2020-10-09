@@ -52,12 +52,12 @@ readVecM (VecM v) = do
 
 newUndefVecM :: IO VecM
 newUndefVecM = do
-  v <- VecM <$> newByteArray 3
+  v <- VecM <$> newByteArray (64*3)
   pure v
 
 newVecM :: Double -> Double -> Double -> IO VecM
 newVecM a b c = do
-  v <- VecM <$> newByteArray 3
+  v <- VecM <$> newByteArray (64*3)
   writeVecM v a b c
   pure v
 
@@ -306,9 +306,16 @@ radiance ray@(Ray o d) depth xi = case intersects ray of
       else continue c
 
 radianceM :: Ray -> CInt -> IORefU Word -> VecM -> IO ()
-radianceM ray@(Ray o d) depth xi dest = case intersects ray of
-  (# !t, _ #) | t == (1/0.0) -> writeVecM dest 0 0 0
+radianceM ray@(Ray o d) depth xi dest = do
+ putStrLn "called radianceM"
+ let !ir = intersects ray
+ putStrLn "called intersects"
+ case intersects ray of
+  (# !t, _ #) | t == (1/0.0) -> do
+      putStrLn "t == 1/0: writing (0, 0, 0)"
+      writeVecM dest 0 0 0
   (# !t, !Sphere r p e c refl #) -> do
+    putStrLn "found sphere"
     let !x = o `addv` (d `mulvs` t)
         !n = norm $ x `subv` p
         !nl = if n `dot` d < 0 then n else n `mulvs` (-1)
@@ -317,6 +324,7 @@ radianceM ray@(Ray o d) depth xi dest = case intersects ray of
         continue :: Vec -> IO ()
         continue !f = case refl of
           DIFF -> do
+            putStrLn "begin DIFF"
             !r1 <- ((2*pi)*) `fmap` erand48 xi
             !r2 <- erand48 xi
             let !r2s = sqrt r2
@@ -328,16 +336,19 @@ radianceM ray@(Ray o d) depth xi dest = case intersects ray of
             -- return $ e `addv` (f `mulv` rad)
             o <- vec2vecM (e `addv` (f `mulv` rad))
             copyVecM dest o
+            putStrLn "done DIFF"
 
           SPEC -> do
+            putStrLn "begin SPEC"
             let !d' = d `subv` (n `mulvs` (2 * (n`dot`d)))
             !rad <- radiance (Ray x d') depth' xi
             -- return $ e `addv` (f `mulv` rad)
             o <- vec2vecM (e `addv` (f `mulv` rad))
             copyVecM dest o
-             
+            putStrLn "done SPEC"
 
           REFR -> do
+            putStrLn "begin REFR"
             let !reflRay = Ray x (d `subv` (n `mulvs` (2* n`dot`d))) -- Ideal dielectric REFRACTION
                 !into = n`dot`nl > 0                -- Ray from outside going in?
                 !nc = 1
@@ -374,15 +385,19 @@ radianceM ray@(Ray o d) depth xi dest = case intersects ray of
                 -- return $ e `addv` (f `mulv` rad)
                 o <- vec2vecM (e `addv` (f `mulv` rad))
                 copyVecM dest o
+                putStrLn "done REFR"
 
     if depth'>5
       then do
+        putStrLn "depth' > 5"
         !er <- erand48 xi
         if er < pr then continue $ c `mulvs` (1/pr)
                   else do -- return e
                      o <- vec2vecM e
                      copyVecM dest o
-      else continue c
+      else do
+        putStrLn "depth' < 5; continue"
+        continue c
 
 
 smallpt :: Int -> Int -> Int -> IO ()
@@ -445,8 +460,11 @@ smallptM !w !h !nsamps = do
                   !d = (cx `mulvs` (((sx + 0.5 + dx)/2 + fromIntegral x)/fromIntegral w - 0.5)) `addv`
                       (cy `mulvs` (((sy + 0.5 + dy)/2 + fromIntegral y)/fromIntegral h - 0.5)) `addv` dir
               -- !rad <- radiance (Ray (org`addv`(d`mulvs`140)) (norm d)) 0 xi
-              radM <- newUndefVecM
+              putStrLn "making radM"
+              radM <- newVecM 0 0 0
+              putStrLn "made radM. calling radiance"
               radianceM (Ray (org`addv`(d`mulvs`140)) (norm d)) 0 xi radM
+              putStrLn "done with radianceM. making rad"
               rad <- vecM2vec radM
               -- Camera rays are pushed forward ^^^^^ to start in interior
               let !r' = (r `addv` (rad `mulvs` (1 / fromIntegral samps)))
